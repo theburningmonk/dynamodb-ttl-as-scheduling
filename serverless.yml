@@ -1,0 +1,105 @@
+service: dynamodb-ttl-scheduler
+
+plugins:
+  - serverless-step-functions
+  - serverless-pseudo-parameters
+
+provider:
+  name: aws
+  runtime: nodejs8.10
+  stage: dev
+  iamRoleStatements:
+    - Effect: Allow
+      Action: 
+        - dynamodb:PutItem
+        - dynamodb:UpdateItem
+        - dynamodb:Scan
+      Resource: 
+        - Fn::GetAtt: [ScheduledItems, Arn]
+        - Fn::GetAtt: [Results, Arn]
+  environment:
+    TABLE_NAME: scheduled_items
+    RESULT_TABLE_NAME: scheduled_item_results
+
+functions:
+  execute-on-schedule:
+    handler: functions/execute-on-schedule.handler
+    events:
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt: [ScheduledItems, StreamArn]
+  
+  schedule:
+    handler: functions/scheduler.handler
+    events:
+      - http:
+          path: /schedule
+          method: POST
+
+  generate-load:
+    handler: functions/generate-load.handler
+    timeout: 900
+
+  wait-for-empty:
+    handler: functions/wait-for-empty.handler 
+
+stepFunctions:
+  stateMachines:
+    loadTest:
+      name: loadTestDynamoDBTTL
+      definition:
+        StartAt: GenerateLoad
+        States:
+          GenerateLoad:
+            Type: Task
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${self:provider.stage}-generate-load
+            Next: WaitOneMin
+          WaitOneMin:
+            Type: Wait
+            Seconds: 60
+            Next: CheckIsEmpty
+          CheckIsEmpty:
+            Type: Task
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${self:provider.stage}-wait-for-empty
+            Next: IsEmpty
+          IsEmpty:
+            Type: Choice
+            Choices:
+              - Variable: $.isEmpty
+                BooleanEquals: true
+                Next: Done
+            Default: WaitOneMin
+          Done:
+            Type: Succeed
+
+resources:
+  Resources:
+    ScheduledItems:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: scheduled_items
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:        
+          - AttributeName: id
+            KeyType: HASH
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+        TimeToLiveSpecification:
+          Enabled: true
+          AttributeName: ttl
+
+    Results:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: scheduled_item_results
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:        
+          - AttributeName: id
+            KeyType: HASH
